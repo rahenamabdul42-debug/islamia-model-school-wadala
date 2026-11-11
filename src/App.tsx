@@ -15,17 +15,19 @@ import { Footer } from './components/Footer';
 import { SupabaseConfigModal } from './components/SupabaseConfigModal';
 import { PrintableAdmissionSlip } from './components/PrintableAdmissionSlip';
 import { AdmissionApplication } from './types';
-import { getLocalAdmissions } from './lib/supabase';
-import { Search, FileText, CheckCircle2, X } from 'lucide-react';
+import { getLocalAdmissions, getSupabaseClient } from './lib/supabase';
+import { Search, FileText, CheckCircle2, X, RefreshCw } from 'lucide-react';
 
 export default function App() {
   const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
+  const [supabaseVersion, setSupabaseVersion] = useState(0);
   const [selectedAdmissionSlip, setSelectedAdmissionSlip] = useState<AdmissionApplication | null>(null);
   const [targetClassForAdmission, setTargetClassForAdmission] = useState<string>('Grade 1');
   const [isTrackingModalOpen, setIsTrackingModalOpen] = useState(false);
   const [trackingSearchInput, setTrackingSearchInput] = useState('');
   const [trackingSearchResult, setTrackingSearchResult] = useState<AdmissionApplication | null>(null);
   const [trackingSearchError, setTrackingSearchError] = useState<string | null>(null);
+  const [trackingSearchLoading, setTrackingSearchLoading] = useState(false);
 
   const scrollToAdmissions = (className?: string) => {
     if (className) {
@@ -37,7 +39,7 @@ export default function App() {
     }
   };
 
-  const handleSearchTracking = (e: React.FormEvent) => {
+  const handleSearchTracking = async (e: React.FormEvent) => {
     e.preventDefault();
     setTrackingSearchError(null);
     setTrackingSearchResult(null);
@@ -45,20 +47,68 @@ export default function App() {
     const query = trackingSearchInput.trim().toUpperCase();
     if (!query) return;
 
+    // 1. Check local storage
     const list = getLocalAdmissions();
-    const found = list.find((a) => a.trackingId.toUpperCase() === query);
+    const found = list.find(
+      (a) =>
+        a.trackingId.toUpperCase() === query ||
+        (a.trackingNumber && a.trackingNumber.toUpperCase() === query)
+    );
 
     if (found) {
       setTrackingSearchResult(found);
-    } else {
-      setTrackingSearchError(`No recorded application found with tracking ID "${query}". Please verify the number or submit an admission form.`);
+      return;
     }
+
+    // 2. Query live Supabase cloud database
+    setTrackingSearchLoading(true);
+    try {
+      const client = getSupabaseClient();
+      if (client) {
+        const { data, error } = await client
+          .from('admissions')
+          .select('*')
+          .eq('tracking_number', query)
+          .maybeSingle();
+
+        if (data && !error) {
+          const app: AdmissionApplication = {
+            id: data.id,
+            studentName: data.student_name,
+            fatherName: data.father_name,
+            dob: data.date_of_birth || data.dob || '',
+            gender: data.gender || 'Male',
+            classApplying: data.class_applying || data.class || 'Grade 1',
+            parentPhone: data.phone || data.parent_phone || '',
+            homeAddress: data.address || data.home_address || '',
+            trackingId: data.tracking_number || query,
+            trackingNumber: data.tracking_number || query,
+            createdAt: data.created_at || new Date().toISOString(),
+            status: 'pending',
+            syncedToCloud: true,
+            cloudId: data.id,
+          };
+          setTrackingSearchResult(app);
+          setTrackingSearchLoading(false);
+          return;
+        }
+      }
+    } catch (err: any) {
+      console.warn('Could not query Supabase for tracking number', err);
+    } finally {
+      setTrackingSearchLoading(false);
+    }
+
+    setTrackingSearchError(
+      `No recorded application found with tracking ID "${query}". Please verify the number or submit an admission form.`
+    );
   };
 
   return (
     <div className="min-h-screen bg-stone-50 text-slate-800 flex flex-col font-sans">
       {/* 1. Header & Navigation */}
       <Header
+        key={`header-${supabaseVersion}`}
         onOpenAdmission={() => scrollToAdmissions()}
         onOpenSupabaseConfig={() => setIsSupabaseModalOpen(true)}
       />
@@ -105,6 +155,7 @@ export default function App() {
 
         {/* 8. Online Admission Section */}
         <AdmissionSection
+          key={`admissions-${supabaseVersion}`}
           initialClass={targetClassForAdmission}
           onOpenConfirmationSlip={(app) => setSelectedAdmissionSlip(app)}
           onOpenSupabaseConfig={() => setIsSupabaseModalOpen(true)}
@@ -133,6 +184,7 @@ export default function App() {
       <SupabaseConfigModal
         isOpen={isSupabaseModalOpen}
         onClose={() => setIsSupabaseModalOpen(false)}
+        onStatusChange={() => setSupabaseVersion((v) => v + 1)}
       />
 
       {/* Printable Slip Modal */}
@@ -181,9 +233,11 @@ export default function App() {
                   />
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white font-bold rounded-lg shadow-sm transition"
+                    disabled={trackingSearchLoading}
+                    className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white font-bold rounded-lg shadow-sm transition disabled:opacity-50 flex items-center gap-1.5"
                   >
-                    Track
+                    {trackingSearchLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>{trackingSearchLoading ? 'Checking...' : 'Track'}</span>
                   </button>
                 </div>
               </form>

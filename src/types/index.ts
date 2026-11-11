@@ -1,6 +1,7 @@
 export interface AdmissionApplication {
   id?: string;
   trackingId: string;
+  trackingNumber?: string;
   studentName: string;
   fatherName: string;
   dob: string;
@@ -10,6 +11,9 @@ export interface AdmissionApplication {
   homeAddress: string;
   createdAt: string;
   status: 'pending' | 'verified' | 'approved';
+  syncedToCloud?: boolean;
+  cloudId?: string;
+  lastSyncError?: string;
   notes?: string;
 }
 

@@ -27,6 +27,7 @@ export const SupabaseConfigModal: React.FC<SupabaseConfigModalProps> = ({
     configured: boolean;
     connected: boolean;
     message: string;
+    detectedColumns?: string[];
   }>({ configured: false, connected: false, message: 'Checking...' });
 
   useEffect(() => {
@@ -48,7 +49,9 @@ export const SupabaseConfigModal: React.FC<SupabaseConfigModalProps> = ({
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    saveSupabaseConfig(url, anonKey);
+    const normalized = saveSupabaseConfig(url, anonKey);
+    setUrl(normalized.url);
+    setAnonKey(normalized.anonKey);
     await verifyStatus();
   };
 
@@ -130,6 +133,23 @@ export const SupabaseConfigModal: React.FC<SupabaseConfigModalProps> = ({
                 </button>
               </div>
               <p className="text-xs mt-1 leading-relaxed opacity-90">{status.message}</p>
+              {status.detectedColumns && status.detectedColumns.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-emerald-200/60 text-[11px]">
+                  <span className="font-semibold text-emerald-900 block mb-1">
+                    Verified admissions columns detected:
+                  </span>
+                  <div className="flex flex-wrap gap-1">
+                    {status.detectedColumns.map((col) => (
+                      <span
+                        key={col}
+                        className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded font-mono text-[10px] font-medium"
+                      >
+                        {col}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -140,14 +160,14 @@ export const SupabaseConfigModal: React.FC<SupabaseConfigModalProps> = ({
                 Supabase Project URL
               </label>
               <input
-                type="url"
+                type="text"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 placeholder="https://your-project-id.supabase.co"
                 className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-lg text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:border-transparent transition"
               />
               <span className="text-[11px] text-slate-500 mt-1 block">
-                Found in your Supabase Dashboard under Project Settings &gt; API.
+                Found in Supabase Dashboard &gt; Project Settings &gt; API. Use base URL: <code className="font-mono text-emerald-800">https://[project-id].supabase.co</code> (any trailing <code className="font-mono text-rose-700">/rest/v1</code> is automatically stripped to prevent PGRST125 errors).
               </span>
             </div>
 

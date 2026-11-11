@@ -1,6 +1,11 @@
 import React, { useState } from 'react';
 import { ADMISSION_CLASSES, SCHOOL_INFO } from '../data/schoolData';
-import { submitAdmissionApplication, checkSupabaseStatus } from '../lib/supabase';
+import {
+  submitAdmissionApplication,
+  checkSupabaseStatus,
+  getLocalAdmissions,
+  syncPendingLocalApplications,
+} from '../lib/supabase';
 import { AdmissionApplication } from '../types';
 import {
   FileText,
@@ -15,6 +20,7 @@ import {
   Sparkles,
   ArrowRight,
   RefreshCw,
+  CloudUpload,
 } from 'lucide-react';
 
 interface AdmissionSectionProps {
@@ -41,8 +47,49 @@ export const AdmissionSection: React.FC<AdmissionSectionProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [submittedApp, setSubmittedApp] = useState<AdmissionApplication | null>(null);
+  const [submissionDestination, setSubmissionDestination] = useState<'supabase' | 'local'>('local');
+  const [supabaseRecordId, setSupabaseRecordId] = useState<string | undefined>(undefined);
   const [submissionWarning, setSubmissionWarning] = useState<string | null>(null);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [dbStatus, setDbStatus] = useState<{ configured: boolean; connected: boolean; message: string }>({
+    configured: false,
+    connected: false,
+    message: '',
+  });
+  const [pendingCount, setPendingCount] = useState(0);
+  const [syncingPending, setSyncingPending] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+
+  const refreshStatus = () => {
+    checkSupabaseStatus().then((res) => setDbStatus(res));
+    const list = getLocalAdmissions();
+    const pending = list.filter((a) => !a.syncedToCloud);
+    setPendingCount(pending.length);
+  };
+
+  const handleSyncPending = async () => {
+    setSyncingPending(true);
+    setSyncNotice(null);
+    try {
+      const res = await syncPendingLocalApplications();
+      if (res.syncedCount > 0) {
+        setSyncNotice(`Synced ${res.syncedCount} offline application(s) to Supabase cloud successfully.`);
+      } else if (res.failedCount > 0) {
+        setSyncNotice(`Could not sync ${res.failedCount} application(s). Check connection or table schema.`);
+      } else {
+        setSyncNotice('All applications are already synchronized with Supabase.');
+      }
+      refreshStatus();
+    } catch (err: any) {
+      setSyncNotice(`Sync error: ${err.message || 'Unknown network error'}`);
+    } finally {
+      setSyncingPending(false);
+    }
+  };
+
+  React.useEffect(() => {
+    refreshStatus();
+  }, []);
 
   // Sync if prop changes
   React.useEffect(() => {
@@ -125,7 +172,10 @@ export const AdmissionSection: React.FC<AdmissionSectionProps> = ({
 
       if (result.success) {
         setSubmittedApp(result.application);
+        setSubmissionDestination(result.destination);
+        setSupabaseRecordId(result.supabaseRecordId);
         setSubmissionWarning(result.warning || null);
+        refreshStatus();
       } else {
         setSubmissionError(result.error || 'Failed to submit application. Please try again.');
       }
@@ -169,20 +219,61 @@ export const AdmissionSection: React.FC<AdmissionSectionProps> = ({
           </p>
         </div>
 
-        {/* Database Status Ribbon & Config Button */}
-        <div className="max-w-3xl mx-auto mb-8 bg-emerald-900/70 border border-emerald-700/60 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-2">
-            <Database className="w-4 h-4 text-amber-400 shrink-0" />
-            <span className="text-emerald-200">
-              Admission records persist to Supabase PostgreSQL database when configured, or local browser storage.
-            </span>
+        {/* Database Status Ribbon & Action Buttons */}
+        <div className="max-w-3xl mx-auto mb-8 space-y-2">
+          <div className="bg-emerald-900/70 border border-emerald-700/60 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <Database className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="text-emerald-200">
+                {dbStatus.connected ? (
+                  <span className="text-emerald-300 font-semibold flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Supabase Cloud Connected: Online admissions table "public.admissions" is live & ready.
+                  </span>
+                ) : (
+                  <span>
+                    Database mode: Local storage active. Link your Supabase project URL to enable instant cloud sync.
+                  </span>
+                )}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {pendingCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleSyncPending}
+                  disabled={syncingPending}
+                  className="px-3 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-lg transition text-[11px] flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-60"
+                  title="Upload locally cached admissions to Supabase"
+                >
+                  <RefreshCw className={`w-3 h-3 ${syncingPending ? 'animate-spin text-slate-950' : 'text-slate-950'}`} />
+                  <span>{syncingPending ? 'Syncing...' : `Sync ${pendingCount} Pending to Cloud`}</span>
+                </button>
+              )}
+              <button
+                onClick={onOpenSupabaseConfig}
+                className="px-3 py-1 bg-emerald-800 hover:bg-emerald-700 text-amber-300 font-semibold rounded-lg border border-emerald-600 transition text-[11px] flex items-center gap-1 cursor-pointer"
+              >
+                <span>{dbStatus.connected ? 'Manage Supabase' : 'Configure Supabase Database'}</span>
+              </button>
+            </div>
           </div>
-          <button
-            onClick={onOpenSupabaseConfig}
-            className="px-3 py-1 bg-emerald-800 hover:bg-emerald-700 text-amber-300 font-semibold rounded-lg border border-emerald-600 transition text-[11px]"
-          >
-            Configure Supabase Database
-          </button>
+
+          {syncNotice && (
+            <div className="p-3 bg-emerald-900/90 border border-emerald-600 rounded-xl text-xs text-amber-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{syncNotice}</span>
+              </div>
+              <button
+                onClick={() => setSyncNotice(null)}
+                className="text-emerald-300 hover:text-white text-xs underline ml-4"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Main Application Container */}
@@ -202,9 +293,34 @@ export const AdmissionSection: React.FC<AdmissionSectionProps> = ({
                   Welcome to Islamia Model School Wadala!
                 </h3>
                 <p className="text-xs sm:text-sm text-slate-600 mt-2 max-w-md mx-auto">
-                  Application for <span className="font-bold text-slate-900">{submittedApp.studentName}</span> has been securely recorded.
+                  Application for <span className="font-bold text-slate-900">{submittedApp.studentName}</span> has been recorded.
                 </p>
               </div>
+
+              {/* Cloud Confirmation or Local Notice */}
+              {submissionDestination === 'supabase' ? (
+                <div className="bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs p-4 rounded-xl max-w-md mx-auto text-left flex items-start gap-3 shadow-sm">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold text-sm block text-emerald-950">
+                      ✓ Confirmed: Saved in Supabase Cloud Database
+                    </span>
+                    <p className="mt-1 text-emerald-800 leading-relaxed">
+                      Admission record was directly inserted into the <code className="font-mono bg-emerald-100/90 px-1 py-0.5 rounded font-bold text-emerald-950">admissions</code> table in Supabase.
+                    </p>
+                    {supabaseRecordId && (
+                      <div className="mt-1.5 font-mono text-[11px] text-emerald-700 font-medium">
+                        Cloud Record ID: {supabaseRecordId}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : submissionWarning ? (
+                <div className="bg-amber-50 border border-amber-200 text-amber-900 text-xs p-3.5 rounded-xl max-w-md mx-auto text-left flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <p className="leading-relaxed">{submissionWarning}</p>
+                </div>
+              ) : null}
 
               {/* Tracking Number Card */}
               <div className="bg-stone-50 border-2 border-dashed border-emerald-700/50 rounded-2xl p-6 max-w-md mx-auto">
@@ -218,14 +334,6 @@ export const AdmissionSection: React.FC<AdmissionSectionProps> = ({
                   Class: <span className="font-semibold text-slate-800">{submittedApp.classApplying}</span> · Father: <span className="font-semibold text-slate-800">{submittedApp.fatherName}</span>
                 </p>
               </div>
-
-              {/* Warning if local mode */}
-              {submissionWarning && (
-                <div className="bg-amber-50 border border-amber-200 text-amber-900 text-xs p-3.5 rounded-xl max-w-md mx-auto text-left flex items-start gap-2.5">
-                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <p className="leading-relaxed">{submissionWarning}</p>
-                </div>
-              )}
 
               {/* Action Buttons */}
               <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
