@@ -60,33 +60,53 @@ export default function App() {
       return;
     }
 
-    // 2. Query live Supabase cloud database
+    // 2. Query live Supabase cloud database using canonical tracking_id
     setTrackingSearchLoading(true);
     try {
       const client = getSupabaseClient();
       if (client) {
-        const { data, error } = await client
+        let targetData: any = null;
+
+        // Query using canonical tracking_id
+        const resTrackingId = await client
           .from('admissions')
           .select('*')
-          .eq('tracking_number', query)
+          .eq('tracking_id', query)
           .maybeSingle();
 
-        if (data && !error) {
+        if (resTrackingId.data) {
+          targetData = resTrackingId.data;
+        } else if (
+          resTrackingId.error &&
+          (resTrackingId.error.code === 'PGRST204' || resTrackingId.error.message.includes('tracking_id'))
+        ) {
+          // Fallback to tracking_number if table uses legacy column
+          const resTrackingNumber = await client
+            .from('admissions')
+            .select('*')
+            .eq('tracking_number', query)
+            .maybeSingle();
+          if (resTrackingNumber.data) {
+            targetData = resTrackingNumber.data;
+          }
+        }
+
+        if (targetData) {
           const app: AdmissionApplication = {
-            id: data.id,
-            studentName: data.student_name,
-            fatherName: data.father_name,
-            dob: data.date_of_birth || data.dob || '',
-            gender: data.gender || 'Male',
-            classApplying: data.class_applying || data.class || 'Grade 1',
-            parentPhone: data.phone || data.parent_phone || '',
-            homeAddress: data.address || data.home_address || '',
-            trackingId: data.tracking_number || query,
-            trackingNumber: data.tracking_number || query,
-            createdAt: data.created_at || new Date().toISOString(),
+            id: targetData.id,
+            studentName: targetData.student_name,
+            fatherName: targetData.father_name,
+            dob: targetData.date_of_birth || targetData.dob || '',
+            gender: targetData.gender || 'Male',
+            classApplying: targetData.class_applying || targetData.class || 'Grade 1',
+            parentPhone: targetData.phone || targetData.parent_phone || '',
+            homeAddress: targetData.home_address || targetData.address || '',
+            trackingId: targetData.tracking_id || targetData.tracking_number || query,
+            trackingNumber: targetData.tracking_id || targetData.tracking_number || query,
+            createdAt: targetData.created_at || new Date().toISOString(),
             status: 'pending',
             syncedToCloud: true,
-            cloudId: data.id,
+            cloudId: targetData.id,
           };
           setTrackingSearchResult(app);
           setTrackingSearchLoading(false);

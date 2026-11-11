@@ -314,27 +314,47 @@ export async function submitAdmissionApplication(
   }
 
   try {
-    // 1. Avoid duplicate submissions by checking if tracking number already exists
+    // 1. Avoid duplicate submissions by checking if tracking_id already exists in Supabase
     try {
-      const { data: existing } = await client
+      let existingRecord: { id: string; tracking_id?: string; tracking_number?: string } | null = null;
+
+      // Primary check using canonical tracking_id
+      const queryTrackingId = await client
         .from('admissions')
-        .select('id, tracking_number')
-        .eq('tracking_number', trackingNumber)
+        .select('id, tracking_id')
+        .eq('tracking_id', trackingNumber)
         .maybeSingle();
 
-      if (existing) {
+      if (queryTrackingId.data) {
+        existingRecord = queryTrackingId.data;
+      } else if (
+        queryTrackingId.error &&
+        (queryTrackingId.error.code === 'PGRST204' || queryTrackingId.error.message.includes('tracking_id'))
+      ) {
+        // Fallback to tracking_number only if table uses legacy column name
+        const queryTrackingNumber = await client
+          .from('admissions')
+          .select('id, tracking_number')
+          .eq('tracking_number', trackingNumber)
+          .maybeSingle();
+        if (queryTrackingNumber.data) {
+          existingRecord = queryTrackingNumber.data;
+        }
+      }
+
+      if (existingRecord) {
         fullApp.syncedToCloud = true;
-        fullApp.cloudId = existing.id;
+        fullApp.cloudId = existingRecord.id;
         saveLocalAdmission(fullApp);
         return {
           success: true,
           destination: 'supabase',
           trackingId: trackingNumber,
-          supabaseRecordId: existing.id,
+          supabaseRecordId: existingRecord.id,
           isDuplicate: true,
           application: {
             ...fullApp,
-            id: existing.id,
+            id: existingRecord.id,
             syncedToCloud: true,
           },
         };
@@ -414,15 +434,15 @@ export async function submitAdmissionApplication(
       payload.phone = fullApp.parentPhone;
     }
 
-    // tracking_number and tracking_id
+    // tracking_id as the single canonical tracking column
     if (knownColumns) {
-      if (knownColumns.has('tracking_number')) payload.tracking_number = trackingNumber;
       if (knownColumns.has('tracking_id')) payload.tracking_id = trackingNumber;
-      if (!knownColumns.has('tracking_number') && !knownColumns.has('tracking_id')) {
-        payload.tracking_number = trackingNumber;
+      if (knownColumns.has('tracking_number')) payload.tracking_number = trackingNumber;
+      if (!knownColumns.has('tracking_id') && !knownColumns.has('tracking_number')) {
+        payload.tracking_id = trackingNumber;
       }
     } else {
-      payload.tracking_number = trackingNumber;
+      payload.tracking_id = trackingNumber;
     }
 
     // created_at
@@ -442,7 +462,7 @@ export async function submitAdmissionApplication(
         const res = await client
           .from('admissions')
           .insert([currentPayload])
-          .select('id, tracking_number');
+          .select('id, tracking_id');
 
         if (!res.error) {
           savedRecordId = res.data?.[0]?.id;
@@ -634,7 +654,7 @@ function saveLocalAdmission(app: AdmissionApplication): void {
 
 export const SUPABASE_SQL_SCHEMA = `-- Run this in your Supabase SQL Editor (Dashboard > SQL Editor > New Query):
 
--- 1. Create admissions table with matching column names:
+-- 1. Create admissions table with tracking_id as canonical tracking column:
 CREATE TABLE IF NOT EXISTS public.admissions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   student_name TEXT NOT NULL,
@@ -646,11 +666,12 @@ CREATE TABLE IF NOT EXISTS public.admissions (
   home_address TEXT,
   address TEXT,
   phone TEXT NOT NULL,
-  tracking_number TEXT NOT NULL UNIQUE,
+  tracking_id TEXT NOT NULL UNIQUE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 2. If table already exists, ensure all matching and alias columns exist safely:
+-- 2. If table already exists, ensure tracking_id and all matching/alias columns exist safely:
+ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS tracking_id TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS student_name TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS father_name TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS class_applying TEXT;
@@ -664,10 +685,13 @@ ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS parent_phone TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS tracking_number TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
--- 3. Enable Row Level Security (RLS)
+-- 3. Synchronize existing records if table previously used tracking_number:
+UPDATE public.admissions SET tracking_id = tracking_number WHERE tracking_id IS NULL AND tracking_number IS NOT NULL;
+
+-- 4. Enable Row Level Security (RLS)
 ALTER TABLE public.admissions ENABLE ROW LEVEL SECURITY;
 
--- 4. Allow public anonymous inserts for online admissions
+-- 5. Allow public anonymous inserts for online admissions
 DROP POLICY IF EXISTS "Allow public insert to admissions" ON public.admissions;
 CREATE POLICY "Allow public insert to admissions"
   ON public.admissions
@@ -675,17 +699,17 @@ CREATE POLICY "Allow public insert to admissions"
   TO anon, authenticated
   WITH CHECK (true);
 
--- 5. Allow public verification by tracking_number
-DROP POLICY IF EXISTS "Allow public read by tracking_number" ON public.admissions;
-CREATE POLICY "Allow public read by tracking_number"
+-- 6. Allow public verification by tracking_id
+DROP POLICY IF EXISTS "Allow public read by tracking_id" ON public.admissions;
+CREATE POLICY "Allow public read by tracking_id"
   ON public.admissions
   FOR SELECT
   TO anon, authenticated
   USING (true);
 
--- 6. Grant permissions
+-- 7. Grant permissions
 GRANT ALL ON TABLE public.admissions TO anon, authenticated;
 
--- 7. Reload Supabase PostgREST schema cache to immediately resolve PGRST204:
+-- 8. Reload Supabase PostgREST schema cache to immediately resolve PGRST204:
 NOTIFY pgrst, 'reload schema';
 `;
