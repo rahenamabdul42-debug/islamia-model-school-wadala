@@ -366,11 +366,21 @@ export const AdmissionSection: React.FC<AdmissionSectionProps> = ({
               </div>
 
               {submissionError && (
-                <div className="bg-rose-50 border border-rose-200 text-rose-900 text-xs p-3.5 rounded-xl flex items-start gap-2.5">
-                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold block">Submission Error</span>
-                    <span>{submissionError}</span>
+                <div className="bg-rose-50 border border-rose-300 text-rose-950 text-xs p-4 rounded-xl flex items-start gap-3 shadow-sm">
+                  <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="flex-1 space-y-1.5">
+                    <span className="font-bold text-sm block text-rose-950">Cloud Database Submission Error</span>
+                    <p className="leading-relaxed text-rose-900">{submissionError}</p>
+                    <div className="pt-1">
+                      <button
+                        type="button"
+                        onClick={onOpenSupabaseConfig}
+                        className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white font-semibold text-xs rounded-lg transition inline-flex items-center gap-1.5 shadow-sm cursor-pointer"
+                      >
+                        <Database className="w-3.5 h-3.5 text-amber-300" />
+                        <span>Configure / Verify Supabase Database</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}

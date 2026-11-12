@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { SCHOOL_INFO } from '../data/schoolData';
+import { submitContactInquiry } from '../lib/supabase';
 import {
   MapPin,
   Phone,
@@ -8,8 +9,10 @@ import {
   Clock,
   Send,
   CheckCircle2,
+  AlertCircle,
   Navigation,
   ExternalLink,
+  RefreshCw,
 } from 'lucide-react';
 
 export const ContactSection: React.FC = () => {
@@ -19,14 +22,40 @@ export const ContactSection: React.FC = () => {
     subject: 'General Inquiry',
     message: '',
   });
+  const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [cloudRecordId, setCloudRecordId] = useState<string | undefined>(undefined);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmissionError(null);
+
     if (!formState.name.trim() || !formState.phone.trim() || !formState.message.trim()) {
       return;
     }
-    setSubmitted(true);
+
+    setLoading(true);
+
+    try {
+      const res = await submitContactInquiry({
+        name: formState.name.trim(),
+        phone: formState.phone.trim(),
+        subject: formState.subject,
+        message: formState.message.trim(),
+      });
+
+      if (res.success) {
+        setCloudRecordId(res.inquiryId);
+        setSubmitted(true);
+      } else {
+        setSubmissionError(res.error || 'Failed to submit inquiry to Supabase.');
+      }
+    } catch (err: any) {
+      setSubmissionError(err.message || 'An unexpected error occurred while sending your inquiry.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -168,18 +197,44 @@ export const ContactSection: React.FC = () => {
                 <div className="w-14 h-14 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center mx-auto">
                   <CheckCircle2 className="w-8 h-8" />
                 </div>
-                <h3 className="text-xl font-bold font-serif text-emerald-950">
-                  Thank You for Contacting Us
-                </h3>
+                <div>
+                  <span className="text-xs font-bold text-emerald-700 uppercase tracking-widest block mb-1">
+                    Inquiry Transmitted Successfully
+                  </span>
+                  <h3 className="text-xl font-bold font-serif text-emerald-950">
+                    Thank You for Contacting Us
+                  </h3>
+                </div>
+
+                {/* Cloud Confirmation Badge */}
+                <div className="bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs p-3.5 rounded-xl max-w-md mx-auto text-left flex items-start gap-3 shadow-sm">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block text-emerald-950">
+                      ✓ Confirmed: Saved in Supabase Cloud Database
+                    </span>
+                    <p className="mt-0.5 text-emerald-800 text-[11px] leading-relaxed">
+                      Your inquiry has been stored in your Supabase database table and sent to the administration desk.
+                    </p>
+                    {cloudRecordId && (
+                      <div className="mt-1 font-mono text-[10px] text-emerald-700 font-medium">
+                        Record ID: {cloudRecordId}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 <p className="text-xs sm:text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
-                  Your message has been received by the Islamia Model School Wadala administration desk. Our representative will contact you shortly via phone/WhatsApp.
+                  Our admissions representative will review your inquiry regarding <span className="font-semibold text-slate-800">{formState.subject}</span> and contact you shortly via phone/WhatsApp at <span className="font-mono font-semibold text-slate-800">{formState.phone}</span>.
                 </p>
+
                 <button
                   onClick={() => {
                     setSubmitted(false);
                     setFormState({ name: '', phone: '', subject: 'General Inquiry', message: '' });
+                    setCloudRecordId(undefined);
                   }}
-                  className="px-5 py-2.5 bg-emerald-800 text-white font-bold text-xs rounded-xl shadow transition"
+                  className="px-5 py-2.5 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs rounded-xl shadow transition cursor-pointer"
                 >
                   Send Another Inquiry
                 </button>
@@ -194,6 +249,16 @@ export const ContactSection: React.FC = () => {
                     Leave your contact details and questions regarding admissions, fee structures, or school visits.
                   </p>
                 </div>
+
+                {submissionError && (
+                  <div className="bg-rose-50 border border-rose-200 text-rose-900 text-xs p-3.5 rounded-xl flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold block">Submission Error</span>
+                      <span className="leading-relaxed">{submissionError}</span>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                   <div className="space-y-1">
@@ -258,10 +323,20 @@ export const ContactSection: React.FC = () => {
 
                 <button
                   type="submit"
-                  className="w-full py-3.5 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow transition flex items-center justify-center gap-2 cursor-pointer"
+                  disabled={loading}
+                  className="w-full py-3.5 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
                 >
-                  <Send className="w-4 h-4" />
-                  <span>Transmit Message to School Office</span>
+                  {loading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
+                      <span>Saving to Supabase Database...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4 text-amber-300" />
+                      <span>Transmit Message to School Office</span>
+                    </>
+                  )}
                 </button>
               </form>
             )}

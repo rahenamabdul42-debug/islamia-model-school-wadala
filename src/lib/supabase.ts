@@ -52,7 +52,7 @@ export function normalizeSupabaseKey(rawKey: string): string {
 }
 
 export function getSupabaseConfig(): SupabaseConfig {
-  // First check localStorage overrides
+  // First check localStorage overrides (saved via Configure Supabase Database modal)
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -68,9 +68,21 @@ export function getSupabaseConfig(): SupabaseConfig {
     console.warn('Could not read Supabase config from storage', e);
   }
 
-  // Fallback to Vite env variables
-  const envUrl = (import.meta.env.VITE_SUPABASE_URL as string) || '';
-  const envKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string) || '';
+  // Fallback to environment variables across Vite, Vercel, Next.js, and Supabase integrations
+  const envUrl =
+    (import.meta.env.VITE_SUPABASE_URL as string) ||
+    (import.meta.env.NEXT_PUBLIC_SUPABASE_URL as string) ||
+    (import.meta.env.SUPABASE_URL as string) ||
+    (import.meta.env.VITE_PUBLIC_SUPABASE_URL as string) ||
+    '';
+
+  const envKey =
+    (import.meta.env.VITE_SUPABASE_ANON_KEY as string) ||
+    (import.meta.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string) ||
+    (import.meta.env.SUPABASE_ANON_KEY as string) ||
+    (import.meta.env.SUPABASE_KEY as string) ||
+    (import.meta.env.VITE_PUBLIC_SUPABASE_ANON_KEY as string) ||
+    '';
 
   return {
     url: normalizeSupabaseUrl(envUrl),
@@ -84,15 +96,21 @@ export function saveSupabaseConfig(rawUrl: string, rawKey: string): { url: strin
 
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ url, anonKey }));
   clientInstance = null; // force client recreation
+  cachedColumns = null;
+  detectedAdmissionsTable = null;
   return { url, anonKey };
 }
 
 export function clearSupabaseConfig(): void {
   localStorage.removeItem(STORAGE_KEY);
   clientInstance = null;
+  cachedColumns = null;
+  detectedAdmissionsTable = null;
 }
 
 let clientInstance: SupabaseClient | null = null;
+let detectedAdmissionsTable: string | null = null;
+let cachedColumns: Set<string> | null = null;
 
 export function getSupabaseClient(): SupabaseClient | null {
   const config = getSupabaseConfig();
@@ -120,19 +138,76 @@ export function getSupabaseClient(): SupabaseClient | null {
   return clientInstance;
 }
 
-let cachedColumns: Set<string> | null = null;
+/**
+ * Dynamically detects which table exists in the user's Supabase project:
+ * Checks 'admissions', 'admission_inquiries', 'inquiries', 'admission_applications', etc.
+ */
+export async function detectAdmissionsTable(): Promise<string> {
+  if (detectedAdmissionsTable) return detectedAdmissionsTable;
+
+  const config = getSupabaseConfig();
+  if (!config.url || !config.anonKey) return 'admissions';
+
+  const client = getSupabaseClient();
+  if (!client) return 'admissions';
+
+  const candidates = ['admissions', 'admission_inquiries', 'inquiries', 'admission_applications', 'applications', 'admission'];
+
+  // 1. Try checking PostgREST OpenAPI spec definitions
+  try {
+    const response = await fetch(`${config.url}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        apikey: config.anonKey,
+        Authorization: `Bearer ${config.anonKey}`,
+      },
+    });
+
+    if (response.ok) {
+      const spec = await response.json();
+      if (spec?.definitions) {
+        for (const candidate of candidates) {
+          if (spec.definitions[candidate]) {
+            detectedAdmissionsTable = candidate;
+            return candidate;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore OpenAPI query error
+  }
+
+  // 2. Fallback probe candidate tables
+  for (const candidate of candidates) {
+    try {
+      const { error } = await client.from(candidate).select('*', { count: 'exact', head: true }).limit(1);
+      if (!error || error.code !== '42P01') {
+        detectedAdmissionsTable = candidate;
+        return candidate;
+      }
+    } catch (e) {
+      // Continue probing
+    }
+  }
+
+  detectedAdmissionsTable = 'admissions';
+  return 'admissions';
+}
 
 /**
  * Inspects the actual Supabase admissions table columns in real time using the PostgREST OpenAPI schema
  * or probing existing records, caching verified columns to permanently eliminate schema mismatch errors.
  */
-export async function getAdmissionsTableColumns(): Promise<Set<string> | null> {
-  if (cachedColumns && cachedColumns.size > 0) {
+export async function getAdmissionsTableColumns(tableOverride?: string): Promise<Set<string> | null> {
+  if (cachedColumns && cachedColumns.size > 0 && !tableOverride) {
     return cachedColumns;
   }
 
   const config = getSupabaseConfig();
   if (!config.url || !config.anonKey) return null;
+
+  const targetTable = tableOverride || (await detectAdmissionsTable());
 
   try {
     // 1. Query PostgREST OpenAPI spec from root /rest/v1/
@@ -146,9 +221,9 @@ export async function getAdmissionsTableColumns(): Promise<Set<string> | null> {
 
     if (response.ok) {
       const spec = await response.json();
-      const admissionsDef = spec?.definitions?.admissions?.properties;
-      if (admissionsDef && typeof admissionsDef === 'object') {
-        const cols = new Set<string>(Object.keys(admissionsDef));
+      const tableDef = spec?.definitions?.[targetTable]?.properties;
+      if (tableDef && typeof tableDef === 'object') {
+        const cols = new Set<string>(Object.keys(tableDef));
         cachedColumns = cols;
         return cols;
       }
@@ -161,7 +236,7 @@ export async function getAdmissionsTableColumns(): Promise<Set<string> | null> {
   try {
     const client = getSupabaseClient();
     if (client) {
-      const { data } = await client.from('admissions').select('*').limit(1);
+      const { data } = await client.from(targetTable).select('*').limit(1);
       if (data && data.length > 0 && typeof data[0] === 'object') {
         const cols = new Set<string>(Object.keys(data[0]));
         cachedColumns = cols;
@@ -304,23 +379,32 @@ export async function submitAdmissionApplication(
   const client = getSupabaseClient();
 
   if (!client) {
+    const config = getSupabaseConfig();
+    const missing = !config.url && !config.anonKey
+      ? 'Supabase URL and API Key are not configured'
+      : !config.url
+      ? 'Supabase Project URL is not configured'
+      : 'Supabase Publishable/Anon Key is not configured';
+
     return {
-      success: true,
+      success: false, // CRITICAL: NEVER claim success if record is not saved in Supabase
       destination: 'local',
       trackingId: trackingNumber,
       application: fullApp,
-      warning: 'Application registered in browser local storage. Connect Supabase to sync cloud records.',
+      error: `Cloud database not connected (${missing}). In Vercel, set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Settings > Environment Variables, or configure them using the "Configure Supabase Database" button.`,
     };
   }
 
   try {
+    const targetTable = await detectAdmissionsTable();
+
     // 1. Avoid duplicate submissions by checking if tracking_id already exists in Supabase
     try {
       let existingRecord: { id: string; tracking_id?: string; tracking_number?: string } | null = null;
 
       // Primary check using canonical tracking_id
       const queryTrackingId = await client
-        .from('admissions')
+        .from(targetTable)
         .select('id, tracking_id')
         .eq('tracking_id', trackingNumber)
         .maybeSingle();
@@ -333,7 +417,7 @@ export async function submitAdmissionApplication(
       ) {
         // Fallback to tracking_number only if table uses legacy column name
         const queryTrackingNumber = await client
-          .from('admissions')
+          .from(targetTable)
           .select('id, tracking_number')
           .eq('tracking_number', trackingNumber)
           .maybeSingle();
@@ -363,8 +447,8 @@ export async function submitAdmissionApplication(
       // Ignore check error and continue to insert
     }
 
-    // 2. Discover actual columns from Supabase
-    const knownColumns = await getAdmissionsTableColumns();
+    // 2. Discover actual columns from Supabase table
+    const knownColumns = await getAdmissionsTableColumns(targetTable);
 
     // 3. Build candidate payload matching all requested columns
     const payload: Record<string, any> = {};
@@ -460,7 +544,7 @@ export async function submitAdmissionApplication(
     for (let attempt = 0; attempt < 8; attempt++) {
       try {
         const res = await client
-          .from('admissions')
+          .from(targetTable)
           .insert([currentPayload])
           .select('id, tracking_id');
 
@@ -472,7 +556,7 @@ export async function submitAdmissionApplication(
 
         // If error is RLS select policy (42501), retry with plain insert without select
         if (res.error.code === '42501' || res.error.message.includes('policy')) {
-          const plainRes = await client.from('admissions').insert([currentPayload]);
+          const plainRes = await client.from(targetTable).insert([currentPayload]);
           if (!plainRes.error) {
             success = true;
             break;
@@ -537,17 +621,21 @@ export async function submitAdmissionApplication(
       fullApp.lastSyncError = lastError?.message || 'Database error';
       saveLocalAdmission(fullApp);
 
-      const isPGRST204 = lastError?.code === 'PGRST204' || lastError?.message?.includes('schema cache');
-      const hint = isPGRST204
-        ? `\nSchema Cache Error: ${lastError.message}.\nRun the updated SQL schema and notify pgrst: NOTIFY pgrst, 'reload schema';`
-        : ` (Error: ${lastError?.message || 'Unknown'}).`;
+      let detailedError = lastError?.message || 'Failed to save record to Supabase database.';
+      if (lastError?.code === '42501' || lastError?.message?.includes('violates row-level security policy')) {
+        detailedError = `Supabase Row Level Security (RLS) Policy Error (42501): The "${targetTable}" table is rejecting anonymous inserts. Please open Supabase SQL Editor and run: CREATE POLICY "Allow public insert" ON public.${targetTable} FOR INSERT TO anon WITH CHECK (true);`;
+      } else if (lastError?.code === '42P01' || lastError?.message?.includes('does not exist')) {
+        detailedError = `Supabase Table Missing (42P01): Table "${targetTable}" does not exist in your Supabase project. Please run the SQL schema script in Supabase SQL Editor.`;
+      } else if (lastError?.code === 'PGRST204' || lastError?.message?.includes('schema cache')) {
+        detailedError = `Supabase Schema Cache Warning (PGRST204): ${lastError.message}. Run: NOTIFY pgrst, 'reload schema'; in Supabase SQL Editor.`;
+      }
 
       return {
-        success: true,
+        success: false, // CRITICAL: Must be false so UI does not show fake success!
         destination: 'local',
         trackingId: trackingNumber,
         application: fullApp,
-        warning: `Saved locally. Cloud sync failed: ${lastError?.message || 'Could not write to Supabase'}.${hint}`,
+        error: detailedError,
       };
     }
 
@@ -575,11 +663,124 @@ export async function submitAdmissionApplication(
     saveLocalAdmission(fullApp);
 
     return {
-      success: true,
+      success: false, // CRITICAL: Must be false on network exception!
       destination: 'local',
       trackingId: trackingNumber,
       application: fullApp,
-      warning: `Saved locally. Cloud sync exception: ${err.message || 'Network error'}.`,
+      error: `Network error while connecting to Supabase: ${err.message || 'Check your connection'}. Application saved locally.`,
+    };
+  }
+}
+
+/**
+ * Submits an Official Inquiry / Admission Inquiry from the Contact Section to Supabase.
+ * Checks for dedicated 'inquiries' or 'admission_inquiries' table, and adaptively maps to 'admissions'.
+ */
+export async function submitContactInquiry(inquiry: {
+  name: string;
+  phone: string;
+  subject: string;
+  message: string;
+}): Promise<{
+  success: boolean;
+  destination: 'supabase' | 'local';
+  inquiryId?: string;
+  error?: string;
+}> {
+  const client = getSupabaseClient();
+  const inquiryRecord = {
+    ...inquiry,
+    createdAt: new Date().toISOString(),
+  };
+
+  if (!client) {
+    return {
+      success: false,
+      destination: 'local',
+      error: 'Supabase cloud database is not connected. In Vercel, set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Environment Variables, or configure them using the database modal.',
+    };
+  }
+
+  try {
+    const candidateTables = ['inquiries', 'admission_inquiries', 'admissions'];
+    let inserted = false;
+    let recordId: string | undefined = undefined;
+    let lastError: any = null;
+
+    for (const table of candidateTables) {
+      try {
+        let payload: Record<string, any>;
+        if (table === 'admissions') {
+          payload = {
+            student_name: inquiry.name,
+            father_name: '[Inquiry Submission]',
+            phone: inquiry.phone,
+            class_applying: inquiry.subject,
+            home_address: inquiry.message,
+            address: inquiry.message,
+            tracking_id: `INQ-2026-${Math.floor(1000 + Math.random() * 9000)}`,
+            created_at: inquiryRecord.createdAt,
+          };
+        } else {
+          payload = {
+            name: inquiry.name,
+            phone: inquiry.phone,
+            subject: inquiry.subject,
+            message: inquiry.message,
+            created_at: inquiryRecord.createdAt,
+          };
+        }
+
+        const res = await client.from(table).insert([payload]).select('id');
+        if (!res.error) {
+          recordId = res.data?.[0]?.id;
+          inserted = true;
+          break;
+        }
+
+        // Try plain insert if select RLS policy is restricted
+        if (res.error.code === '42501' || res.error.message.includes('policy')) {
+          const plainRes = await client.from(table).insert([payload]);
+          if (!plainRes.error) {
+            inserted = true;
+            break;
+          }
+          lastError = plainRes.error;
+        } else {
+          lastError = res.error;
+        }
+
+        // If table doesn't exist (42P01), try the next candidate table
+        if (res.error.code === '42P01' || res.error.message.includes('does not exist')) {
+          continue;
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (!inserted) {
+      let detailed = lastError?.message || 'Failed to submit inquiry to Supabase.';
+      if (lastError?.code === '42501' || lastError?.message?.includes('policy')) {
+        detailed = 'Supabase Row Level Security (RLS) Policy error (42501): The database table rejected public insertion. Run: CREATE POLICY "Allow public insert" ON public.inquiries FOR INSERT TO anon WITH CHECK (true);';
+      }
+      return {
+        success: false,
+        destination: 'local',
+        error: detailed,
+      };
+    }
+
+    return {
+      success: true,
+      destination: 'supabase',
+      inquiryId: recordId,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      destination: 'local',
+      error: err.message || 'Network exception while connecting to Supabase database',
     };
   }
 }
@@ -654,7 +855,9 @@ function saveLocalAdmission(app: AdmissionApplication): void {
 
 export const SUPABASE_SQL_SCHEMA = `-- Run this in your Supabase SQL Editor (Dashboard > SQL Editor > New Query):
 
--- 1. Create admissions table with tracking_id as canonical tracking column:
+-- ==============================================================================
+-- 1. ADMISSIONS TABLE (Online Admission Applications)
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.admissions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   student_name TEXT NOT NULL,
@@ -670,7 +873,7 @@ CREATE TABLE IF NOT EXISTS public.admissions (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 2. If table already exists, ensure tracking_id and all matching/alias columns exist safely:
+-- Ensure tracking_id and all matching/alias columns exist safely:
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS tracking_id TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS student_name TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS father_name TEXT;
@@ -685,13 +888,13 @@ ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS parent_phone TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS tracking_number TEXT;
 ALTER TABLE public.admissions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
--- 3. Synchronize existing records if table previously used tracking_number:
+-- Synchronize existing records if table previously used tracking_number:
 UPDATE public.admissions SET tracking_id = tracking_number WHERE tracking_id IS NULL AND tracking_number IS NOT NULL;
 
--- 4. Enable Row Level Security (RLS)
+-- Enable Row Level Security (RLS) on admissions
 ALTER TABLE public.admissions ENABLE ROW LEVEL SECURITY;
 
--- 5. Allow public anonymous inserts for online admissions
+-- Allow public anonymous inserts
 DROP POLICY IF EXISTS "Allow public insert to admissions" ON public.admissions;
 CREATE POLICY "Allow public insert to admissions"
   ON public.admissions
@@ -699,7 +902,7 @@ CREATE POLICY "Allow public insert to admissions"
   TO anon, authenticated
   WITH CHECK (true);
 
--- 6. Allow public verification by tracking_id
+-- Allow public verification by tracking_id
 DROP POLICY IF EXISTS "Allow public read by tracking_id" ON public.admissions;
 CREATE POLICY "Allow public read by tracking_id"
   ON public.admissions
@@ -707,9 +910,42 @@ CREATE POLICY "Allow public read by tracking_id"
   TO anon, authenticated
   USING (true);
 
--- 7. Grant permissions
 GRANT ALL ON TABLE public.admissions TO anon, authenticated;
 
--- 8. Reload Supabase PostgREST schema cache to immediately resolve PGRST204:
+-- ==============================================================================
+-- 2. INQUIRIES TABLE (Contact & Admission Inquiries)
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.inquiries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  subject TEXT,
+  message TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Enable RLS on inquiries
+ALTER TABLE public.inquiries ENABLE ROW LEVEL SECURITY;
+
+-- Allow public anonymous inserts for inquiries
+DROP POLICY IF EXISTS "Allow public insert to inquiries" ON public.inquiries;
+CREATE POLICY "Allow public insert to inquiries"
+  ON public.inquiries
+  FOR INSERT
+  TO anon, authenticated
+  WITH CHECK (true);
+
+-- Allow public reading inquiries
+DROP POLICY IF EXISTS "Allow public read to inquiries" ON public.inquiries;
+CREATE POLICY "Allow public read to inquiries"
+  ON public.inquiries
+  FOR SELECT
+  TO anon, authenticated
+  USING (true);
+
+GRANT ALL ON TABLE public.inquiries TO anon, authenticated;
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+
+-- Force PostgREST to reload schema cache immediately
 NOTIFY pgrst, 'reload schema';
 `;

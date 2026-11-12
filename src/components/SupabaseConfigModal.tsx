@@ -219,11 +219,28 @@ export const SupabaseConfigModal: React.FC<SupabaseConfigModalProps> = ({
             </div>
           </form>
 
+          {/* Vercel Deployment Instructions Card */}
+          <div className="bg-emerald-50/80 border border-emerald-200 rounded-xl p-4 text-xs space-y-2">
+            <span className="font-bold text-emerald-950 block text-xs uppercase tracking-wider">
+              Permanent Setup for Vercel Live Website
+            </span>
+            <p className="text-emerald-900 leading-relaxed text-[11px]">
+              To ensure all students on your live Vercel URL are connected to Supabase automatically without configuring anything in their browser, add these 2 environment variables in <strong className="text-emerald-950">Vercel Dashboard &gt; Project &gt; Settings &gt; Environment Variables</strong>:
+            </p>
+            <div className="space-y-1 font-mono text-[11px] bg-white p-2.5 rounded-lg border border-emerald-300">
+              <div><strong className="text-emerald-900">VITE_SUPABASE_URL</strong> = <span className="text-slate-500">https://[your-project-id].supabase.co</span></div>
+              <div><strong className="text-emerald-900">VITE_SUPABASE_ANON_KEY</strong> = <span className="text-slate-500">eyJhbGciOi... (your publishable anon key)</span></div>
+            </div>
+            <p className="text-[11px] text-emerald-800">
+              Also supported: <code className="font-mono text-emerald-950">NEXT_PUBLIC_SUPABASE_URL</code> and <code className="font-mono text-emerald-950">SUPABASE_URL</code>. Once saved in Vercel, trigger a <strong>Redeploy</strong>.
+            </p>
+          </div>
+
           {/* SQL Table Creation Helper */}
           <div className="border-t border-stone-200 pt-4">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                Required Supabase SQL Schema for Admissions Table
+                Required Supabase SQL Schema & RLS Policies
               </span>
               <button
                 onClick={handleCopySchema}
